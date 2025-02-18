@@ -17,4 +17,4 @@
 
 ./HiGenAnno1.1
 
-##Note: because the installization of HiGenAnno1.1 is too complicated, I will update it later.
+##Note: because the installization of HiGenAnno1.1 is complicated, please see the details in the HiGenAnno1.1 code file for the details.

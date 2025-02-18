@@ -4,12 +4,17 @@
 # Assembly: HiGenAss
 
 1.HiFiAsm.sh
+
 2.NextDenovo.sh
+
 3.Peregrine.sh
+
 4.PurgeDup.sh
+
 5.YAHS.sh
 
 # Annotation: HiGenAnn
 
 ./HiGenAnno1.1
-## Note: because the installization of HiGenAnno1.1 is too complicated, I will update it later.
+
+##Note: because the installization of HiGenAnno1.1 is too complicated, I will update it later.

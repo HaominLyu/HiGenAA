@@ -1,0 +1,484 @@
+#!/bin/bash
+
+
+#### This is a pipeline used for automatically annotated genomes, including TE, gene, RNA, and functions.
+#### Author: Haomin Lyu
+#### Email: Haomin.Lyu@hotmail.com
+
+
+#### Dependecy:
+#### Put all codes in 0.Codes, put genome.fa in 0.Genome, and put RNAseq.fq.gz in 0.RNAseq, and put relative genome data in 0.RelativeGenome
+#### Put prefix of NGS RNA-seq in ngs.lst, and put prefix of full-length RNA-seq in full.lst
+#### Put weights.txt in 0.Genome, used for EVidenceModeler
+#### Put Pfam-A.hmm.gz, Pfam-A.hmm.dat.gz, Rfam.cm.gz, Rfam.clanin, and uniprot_sprot.fasta.gz in 0.Database
+#### Put embryophyta_odb10.tar.gz, eudicots_odb10.tar.gz, or eukaryota_odb10.tar.gz in the folder 0.Database
+#### conda create -n annotation -c conda-forge -c bioconda gffread infernal trnascan-se hisat2 miniprot fastp samtools stringtie pbccs lima isoseq3 pbmm2 gemoma braker3 augustus transdecoder==5.7.1 evidencemodeler==2.1.0
+#### conda create -n taco taco
+#### conda create -n busco busco
+#### conda create -n java openjdk
+#### conda create -n evo orthofinder
+#### conda create -n function eggnog-mapper
+#### python3 download_eggnog_data.py -y -F -P -H --dbname Viridiplantae (source activate function)
+#### conda create -n EDTA -c conda-forge -c bioconda -c r annosine2 biopython blast cd-hit coreutils genericrepeatfinder genometools-genometools glob2 h5py==3.9 keras==2.11 ltr_finder ltr_retriever mdust multiprocess muscle openjdk pandas perl perl-text-soundex pyarrow python r-base r-dplyr regex repeatmodeler r-ggplot2 r-here r-tidyr scikit-learn swifter tensorflow==2.11 tesorter
+#### git clone https://github.com/oushujun/EDTA.git
+#### git clone https://github.com/tseemann/barrnap.git
+#### git clone https://github.com/Gaius-Augustus/Augustus.git
+#### git clone https://github.com/gatech-genemark/GeneMark-ETP.git
+#### git clone https://github.com/gatech-genemark/ProtHint.git
+#### git clone https://github.com/EVidenceModeler/EVidenceModeler.git
+#### export AUGUSTUS_CONFIG_PATH=/home/lvhm/.conda/envs/annotation/config/
+#### export AUGUSTUS_BIN_PATH=/home/lvhm/.conda/envs/annotation/bin/
+#### export AUGUSTUS_SCRIPTS_PATH=/home/lvhm/Software/Augustus/scripts/
+#### export GENEMARK_PATH=/gpfs/users/haomin/8.Development/Software/GeneMark-ETP-main/bin
+#### export MAKEHUB_PATH=/gpfs/users/haomin/8.Development/Software/GeneMark-ETP-main/bin
+#### export PROTHINT_PATH=/gpfs/users/haomin/8.Development/Software/ProtHint-master/bin
+#### cp /gpfs/users/haomin/8.Development/Software/BuscoRunner.py /gpfs/users/haomin/8.Development/miniconda3/envs/busco/lib/python3.9/site-packages/busco/
+
+
+cores=64
+step=0
+
+while getopts s:g:j:p:c: opt
+do
+        case "${opt}" in
+                s) prefix=${OPTARG};;
+                g) gname=${OPTARG};;
+                p) geneprefix=${OPTARG};;
+                j) cores=${OPTARG};;
+		c) step=${OPTARG};;
+        esac
+done
+
+
+if [ ! $prefix ] || [ ! $gname ] || [ ! $geneprefix ]; then
+        echo "Usage: HiGenAnno -s [Species] -g [Genome] -p [Gene Prefix] -j [Threads] -c [Step]";
+        echo ""
+        echo "     -s   Species name or any prefix words for output files.";
+        echo ""
+        echo "     -g   The name of genome file. JUST NAME, NO PATH.";
+        echo ""
+        echo "     -p   Prefix for gene names. Suggestion: 2-5 letters short for species";
+        echo ""
+        echo "     -j   Number of Threads [Default: 64]";
+        echo ""
+	echo "     -c   Skip step: 1 - skip 6";
+	echo "                     2 - skip 6-7";
+	echo "                     3 - skip 6-8";
+	echo "                     4 - skip 6-9";
+	echo ""
+        exit 1;
+fi
+
+
+path=`pwd`
+echo "Checking file structures for annotation:" > $path/GenomeAnno.log
+if [ ! -d $path/0.Codes ] || [ ! -d $path/0.Genome ] || [ ! -d $path/0.RelativeGenome ] || [ ! -d $path/0.RNAseq ] || [ ! -d $path/0.Database ]; then
+        echo "ERROR: Please put necessary files in each of the three folders: 0.Codes, 0.Database, 0.Genome, 0.RelativeGenome, and 0.RNAseq." >> $path/GenomeAnno.log
+fi
+
+cd $path/0.Genome
+if [ ! -f $path/0.Genome/$gname ]; then
+        echo "ERROR: Please put your genome file $gname in 0.Genome folder." >> $path/GenomeAnno.log
+fi
+if [ ! -f $path/0.Genome/weights.txt ]; then
+        echo "ERROR: You may forget to copy weights.txt file in 0.Genome folder. The weights.txt file has been provided by this program." >> $path/GenomeAnno.log
+fi
+
+cd $path/0.Database
+if [ ! -d $path/0.Database/busco_downloads/embryophyta_odb10/ ]; then
+        if [ -f $path/0.Database/*_odb*.tar.gz ]; then
+                mkdir busco_downloads
+                mv *_odb*.tar.gz busco_downloads
+                cd busco_downloads; tar -zxvf *_odb*.tar.gz; cd ..
+        else
+                echo "ERROR: Please download one of BUSCO database *_odb*.tar.gz to the folder 0.Database." >> $path/GenomeAnno.log
+        fi
+fi
+if [ -f $path/0.Database/*.gz ]; then
+        gunzip *.gz
+fi
+if [ -f $path/0.Database/Pfam-A.hmm ] && [ -f $path/0.Database/Pfam-A.hmm.dat ]; then
+        source activate annotation
+        rm Pfam-A.hmm.h3*
+        hmmpress Pfam-A.hmm &
+        conda deactivate
+else
+        echo "ERROR: Please download the Pfam-A.hmm.gz and Pfam-A.hmm.dat.gz to the folder 0.Database." >> $path/GenomeAnno.log
+fi
+if [ -f $path/0.Database/Rfam.cm ] && [ -f $path/0.Database/Rfam.clanin ]; then
+        rm Rfam.cm.i1*
+        cmpress Rfam.cm &
+else
+        echo "ERROR: Please download the Rfam.cm.gz and Rfam.clanin to the folder 0.Database." >> $path/GenomeAnno.log
+fi
+if [ ! -f $path/0.Database/uniprot_sprot.fasta ]; then
+        echo "ERROR: Please download uniprot_sprot.fasta.gz to the folder 0.Database." >> $path/GenomeAnno.log
+else
+        sed '/^>/s/ .*//' uniprot_sprot.fasta > UniProt.fa
+        source activate annotation
+        diamond makedb --in UniProt.fa --threads 32 --db ReviewedUniProt --tmpdir ./tmp1 &
+        conda deactivate
+fi
+
+cd $path/0.RNAseq
+if [ ! -f $path/0.RNAseq/ngs.lst ]; then
+        echo "ERROR: Please list the prefixes of NGS RNA-seq data in ngs.lst file; and list the prefix(es) of full-length RNA-seq data in full.lst file if applicable." >> $path/GenomeAnno.log
+else
+        while read name
+         do
+                if [ ! -f ${name}_*1.f*q.gz ] || [ ! -f ${name}_*2.f*q.gz ]; then
+			if [ ! -f ${name}.f*q.gz ]; then
+	                        echo "ERROR: Please check your NGS RNA-seq data and their suffix of fq.gz or fastq.gz." >> $path/GenomeAnno.log
+			fi
+                fi
+         done < ngs.lst
+fi
+if [ -f $path/0.RNAseq/full.lst ]; then
+        while read name
+         do
+                if [ ! -f ${name}.f*q.gz ] || [ ! -f ${name}_*2.f*q.gz ] || [ ! -f ${name}.*.bam ]; then
+                        echo "ERROR: Please check your full-length RNA-seq data and their suffix of fq.gz or fastq.gz or bam." >> $path/GenomeAnno.log
+                fi
+         done < full.lst
+fi
+
+cd $path/0.RelativeGenome
+if [ -f $path/0.RelativeGenome/Relative.pep.fa ]; then
+        rm Relative.pep.fa
+fi
+for name in `ls *.genome.fa | sed 's/\.genome.fa//g'`
+ do
+        if [ ! -f $path/0.RelativeGenome/$name.genome.fa ] || [ ! -f $path/0.RelativeGenome/$name.gff ] || [ ! -f $path/0.RelativeGenome/$name.pep.fa ]; then
+                echo "ERROR: Please check the *.genome.fa, *.pep.fa, and *.gff files in 0.RelativeGenome folder." >> $path/GenomeAnno.log
+        fi
+ done
+cat *.pep.fa > Relative.pep.fa
+
+cd $path
+if [ `grep -c "ERROR" $path/GenomeAnno.log` -ne '0' ]; then
+        exit 1
+else
+        echo "Pass the file structure checking." >> $path/GenomeAnno.log
+fi
+
+
+genome=`realpath $path/0.Genome/$gname`
+echo "Start Genome Annotation:" >> $path/GenomeAnno.log
+dirs=("1.EDTA" "2.FilterRNAseq" "3.RNAseq_based" "4.Homology_based" "5.braker3_based" "6.EVidenceModeler" "7.CleanUp" "8.BUSCO" "9.ncRNA" "10.Function")
+for dir in "${dirs[@]}";
+ do
+        if [ ! -d $path/$dir ]; then
+                mkdir $path/$dir
+        fi
+ done
+
+
+## PASS
+echo "`date`     Step 1: Genome-wide transposon annotation using EDTA [start]"  >> $path/GenomeAnno.log
+cd $path/1.EDTA
+if [ ! -f $path/1.EDTA/*mod.MAKER.masked ] && [ ! -f $path/1.EDTA/*mod.*.sum ]; then
+        source activate EDTA
+        EDTA.pl --genome $genome --overwrite 1 --anno 1 --evaluate 1 --threads $cores > EDTA.log
+        conda deactivate
+fi
+echo "`date`     Step 1: Genome-wide transposon annotation using EDTA [end]"  >> $path/GenomeAnno.log
+
+source activate annotation
+cd $path/0.Genome/
+if [ ! -f $path/0.Genome/$prefix.maskedgenome.fa ]; then
+        cp $path/1.EDTA/*.mod.MAKER.masked $path/0.Genome/$prefix.maskedgenome.fa
+fi
+if [ ! -f $path/0.Genome/$prefix.mpi ]; then
+        miniprot -t32 -d $prefix.mpi $prefix.maskedgenome.fa
+fi
+if [ ! -f $path/0.Genome/$prefix.mmi ]; then
+        pbmm2 index $prefix.maskedgenome.fa $prefix.mmi
+fi
+if [ ! -f $path/0.Genome/$prefix.6.ht2 ]; then
+        hisat2-build $prefix.maskedgenome.fa $prefix
+fi
+
+
+## PASS
+echo "`date`     Step 2: Quality control of RNA-seq data using fastp [start]" >> $path/GenomeAnno.log
+cd $path/0.RNAseq
+while read name
+ do
+        if [ ! -f $path/2.FilterRNAseq/$name.filtered*.fq.gz ]; then
+                if [ -f $path/0.RNAseq/${name}_*1.f*q.gz ]; then
+                        fastp --in1 ${name}_*1.f*q.gz --in2 ${name}_*2.f*q.gz --out1 $path/2.FilterRNAseq/$name.filtered1.fq.gz --out2 $path/2.FilterRNAseq/$name.filtered2.fq.gz --thread $cores -j report.$name.json -h report.$name.html 2>> FastpFilter.log
+                else
+                        fastp --in1 $name.f*q.gz --out1 $path/2.FilterRNAseq/$name.filtered.fq.gz --thread $cores -j report.$name.json -h report.$name.html 2>> FastpFilter.log
+                fi
+        fi
+ done < $path/0.RNAseq/ngs.lst
+echo "`date`     Step 2: Quality control of RNA-seq data using fastp [end]" >> $path/GenomeAnno.log
+
+
+## PASS
+echo "`date`     Step 3-1: NGS RNA-seq data to assemble transcripts [start]" >> $path/GenomeAnno.log
+cd $path/3.RNAseq_based
+index=$path/0.Genome/$prefix
+for name in `ls $path/2.FilterRNAseq/*.gz | sed 's/.*\///g' | sed 's/\..*//g' | sort | uniq`
+#while read name
+ do
+        if [ ! -f $name.bam ]; then
+                if [ -f $path/2.FilterRNAseq/$name.filtered1.fq.gz ]; then
+                        hisat2 -p $cores --dta -x $index -1 $path/2.FilterRNAseq/$name.filtered1.fq.gz -2 $path/2.FilterRNAseq/$name.filtered2.fq.gz -S ${name}.sam
+                else
+                        hisat2 -p $cores --dta -x $index -U $path/2.FilterRNAseq/$name.filtered.fq.gz -S ${name}.sam
+                fi
+
+        	samtools sort -@ $cores -o ${name}.bam ${name}.sam
+	        rm ${name}.sam
+        fi
+
+        if [ ! -f $name.gtf ]; then
+                stringtie -p $cores -o ${name}.gtf -l $name ${name}.bam
+        fi
+ done
+# done < $path/0.RNAseq/ngs.lst
+ls *.bam | sed "s:^:`pwd`/: " | sed ":a;N;s/\n/,/g;ta" > AllBam
+bam=`cat AllBam`
+echo "`date`     Step 3-1: NGS RNA-seq data to assemble transcripts [end]" >> $path/GenomeAnno.log
+
+
+## Working for pipeline
+if [ -f $path/0.RNAseq/full.lst ]; then
+        echo "`date`     Step 3-2: Full-length RNA-seq data to assemble transcripts [start]" >> $path/GenomeAnno.log
+        while read name
+         do
+                conda deactivate
+                source activate java
+                java -jar ../0.Codes/picard.jar FastqToSam F1=$path/0.RNAseq/$name.fastq.gz O=$path/2.FilterRNAseq/$name.bam SM=$name
+                conda deactivate
+                source activate annotation
+
+                ccs $name.subreads.bam $name.ccs.bam --min-rq 0.9 --num-threads $cores --skip-polish --min-passes 1 
+                lima $name.ccs.bam $path/0.RNAseq/barcoded_primers.fasta $name.demux.ccs.bam --isoseq --peek-guess --num-threads $cores
+                isoseq3 refine --num-threads $cores --require-polya $name.demux.ccs.bam $path/0.RNAseq/primers.fasta $name.flnc.bam
+                isoseq3 cluster $name.flnc.bam $name.clustered.bam --num-threads $cores --verbose --use-qvs
+                #ls movie*.flnc.bam movie*.flnc.bam movie*.flnc.bam > flnc.fofn
+                #isoseq3 cluster flnc.fofn clustered.bam --num-threads $cores --verbose --use-qvs
+                pbmm2 align --preset ISOSEQ --sort --num-threads $cores $path/0.Genome/$prefix.mmi $name.clustered.bam $name.mapped.bam
+                isoseq3 collapse --do-not-collapse-extra-5exons --num-threads $cores $name.mapped.bam $name.flnc.bam $name.collapsed.gff
+         done < $path/0.RNAseq/full.lst
+        echo "`date`     Step 3-2: Full-length RNA-seq data to assemble transcripts [end]" >> $path/GenomeAnno.log
+fi
+
+
+## PASS
+echo "`date`     Step 3: Merge transcripts for RNA-seq based gene prediction [start]" >> $path/GenomeAnno.log
+if [ ! -f $path/3.RNAseq_based/Merge.$prefix/assembly.gtf ]; then
+        ls *.gtf | sed "s:^:`pwd`/: " > Mergelist.txt
+        conda deactivate
+        source activate taco
+        rm -rf Merge.$prefix
+        taco_run -o Merge.$prefix -p $cores Mergelist.txt
+        conda deactivate
+        source activate annotation
+fi
+if [ ! -f $path/3.RNAseq_based/$prefix.transdecoder.gff3 ]; then
+        echo "gtf_genome_to_cdna_fasta.pl Merge.$prefix/assembly.gtf $path/0.Genome/$prefix.maskedgenome.fa > $prefix.transcripts.fa" > TransDecoder.sh
+        echo "gtf_to_alignment_gff3.pl Merge.$prefix/assembly.gtf > $prefix.transcripts.gff3" >> TransDecoder.sh
+        echo "TransDecoder.LongOrfs -t $prefix.transcripts.fa" >> TransDecoder.sh
+        echo "TransDecoder.Predict -t $prefix.transcripts.fa" >> TransDecoder.sh
+        echo "cdna_alignment_orf_to_genome_orf.pl $prefix.transcripts.fa.transdecoder.gff3 $prefix.transcripts.gff3 $prefix.transcripts.fa > $prefix.transdecoder.gff3" >> TransDecoder.sh
+        chmod u+x ./TransDecoder.sh
+        ./TransDecoder.sh 2>>transdecoder.log &
+fi
+echo "`date`     Step 3: Merge transcripts for RNA-seq based gene prediction [end]" >> $path/GenomeAnno.log
+
+
+## PASS
+echo "`date`     Step 4: Homology-based gene prediction [start]" >> $path/GenomeAnno.log
+cd $path/4.Homology_based/
+if [ ! -f $path/4.Homology_based/$prefix/final_annotation.gff ]; then
+        rm -rf GeMoMa_temp $prefix GeMoMa.sh
+        echo "java -jar ~/.conda/envs/annotation/share/gemoma-1.9-0/GeMoMa-1.9.jar CLI GeMoMaPipeline \\" > GeMoMa.sh
+        echo "threads=$cores AnnotationFinalizer.r=NO p=false o=true tblastn=false t=$path/0.Genome/$prefix.maskedgenome.fa outdir=$prefix \\" >> GeMoMa.sh
+        for name in `ls $path/0.RelativeGenome/*gff | sed 's/.gff//g' | sed 's/.*\///g'`
+         do 
+                echo "s=own i=$name a=$path/0.RelativeGenome/$name.gff g=$path/0.RelativeGenome/$name.genome.fa \\" >> GeMoMa.sh
+         done
+        chmod u+x GeMoMa.sh
+        ./GeMoMa.sh 2>> gemoma.log
+fi
+
+if [ ! -f $path/4.Homology_based/miniprot.gff ]; then
+        miniprot -t $cores --gff $path/0.Genome/$prefix.maskedgenome.fa $path/0.RelativeGenome/Relative.pep.fa > miniprot.gff 2>>miniprot.log
+fi
+echo "`date`     Step 4: Homology-based gene prediction [end]" >> $path/GenomeAnno.log
+
+
+## PASS
+echo "`date`     Step 5: de novo-based gene prediction [start]" >> $path/GenomeAnno.log
+cd $path/5.braker3_based
+if [ ! -f $path/5.braker3_based/braker/braker.gtf ]; then
+        rm -rf braker/ error.log nohup.out
+        rm -rf /home/lvhm/Software/Augustus/config/species/$prefix
+        rm -rf /home/lvhm/.conda/envs/annotation/config/species/$prefix
+        braker.pl --gff3 --threads 48 --species=$prefix --genome=$path/0.Genome/$prefix.maskedgenome.fa --prot_seq=$path/0.RelativeGenome/Relative.pep.fa --bam=$bam 2>>braker.log
+fi
+echo "`date`     Step 5: de novo-based gene prediction [end]" >> $path/GenomeAnno.log
+
+
+## PASS
+if [ "$step" -lt 1 ] 2>/dev/null; then
+	echo "`date`     Step 6: Merge all predictions of gene structure using EVidenceModeler [start]" >> $path/GenomeAnno.log
+	cd $path/6.EVidenceModeler
+	rm -rf *
+	/home/lvhm/Software/EVidenceModeler-v2.1.0/EvmUtils/misc/braker_GTF_to_EVM_GFF3.pl $path/5.braker3_based/braker/braker.gtf | awk 'BEGIN{OFS="\t"}{$2="braker";print}' > EVM.braker.gff3
+	/home/lvhm/Software/EVidenceModeler-v2.1.0/EvmUtils/misc/GeMoMa_gff_to_gff3.pl $path/4.Homology_based/$prefix/final_annotation.gff | awk 'BEGIN{OFS="\t"}{$2="gemoma";print}' > EVM.gemoma.gff3
+	/home/lvhm/Software/EVidenceModeler-v2.1.0/EvmUtils/misc/miniprot_GFF_2_EVM_GFF3.py $path/4.Homology_based/miniprot.gff | awk 'BEGIN{OFS="\t"}{$2="miniprot";print}' > EVM.miniprot.gff3
+	awk 'BEGIN{OFS="\t"}{$2="transdecoder";print}' $path/3.RNAseq_based/$prefix.transdecoder.gff3 > ./EVM.transdecoder.gff3
+	#/home/lvhm/Software/EVidenceModeler-v2.1.0/EvmUtils/create_weights_file.pl -A EVM.braker.gff3 -P EVM.gemoma.gff3 -T EVM.transdecoder.gff3 > weights.txt
+	cp $path/0.Genome/weights.txt ./
+	cat EVM.braker.gff3 EVM.gemoma.gff3 EVM.miniprot.gff3 EVM.transdecoder.gff3 > gene_predictions.gff3
+
+	/home/lvhm/Software/EVidenceModeler-v2.1.0/EvmUtils/partition_EVM_inputs.pl --partition_dir ./partition --genome $genome --gene_predictions gene_predictions.gff3 --segmentSize 100000 --overlapSize 10000 --partition_listing partitions_list.out 2>>evm.log
+	/home/lvhm/Software/EVidenceModeler-v2.1.0/EvmUtils/write_EVM_commands.pl --genome $genome --weights `pwd`/weights.txt --gene_predictions gene_predictions.gff3 --output_file_name evm.out --partitions partitions_list.out > commands.list 2>>evm.log
+	parallel --jobs $cores < commands.list 2>>evm.log
+
+	/home/lvhm/Software/EVidenceModeler-v2.1.0/EvmUtils/recombine_EVM_partial_outputs.pl --partitions partitions_list.out --output_file_name evm.out
+	/home/lvhm/Software/EVidenceModeler-v2.1.0/EvmUtils/convert_EVM_outputs_to_GFF3.pl --partitions partitions_list.out --output_file_name evm.out --genome $genome
+
+	cat `find ./partition -regex ".*evm.out.gff3"` | bedtools sort -i - > EVM.all.gff
+	awk '{if($3~"gene"){print 1,$0}else if($3~"mRNA"){print 2,$0}else if($3~"exon"){print 3,$0}else{print 4,$0}}' $path/6.EVidenceModeler/EVM.all.gff | sort -k2,2 -k5,5n -k1,1n | sed 's/^[1234] //g' > $prefix.reorder.gff
+	perl $path/0.Codes/ChangeNameGff.pl $prefix.reorder.gff $geneprefix > $prefix.gene.gff
+	gffread -g $genome -x $prefix.cds.fa -y $prefix.pep.fa -S $prefix.gene.gff
+	conda deactivate
+	echo "`date`     Step 6: Merge all predictions of gene structure using EVidenceModeler [end]" >> $path/GenomeAnno.log
+else
+	echo "`date`     Step 6: Merge all predictions of gene structure using EVidenceModeler [skip]" >> $path/GenomeAnno.log
+fi
+
+
+if [ "$step" -lt 2 ] 2>/dev/null; then
+	echo "`date`     Step 7: Clean up the genes and reformat the name [start]" >> $path/GenomeAnno.log
+	cd $path/7.CleanUp
+	rm -rf *
+	source activate evo
+	rm -rf Orthofinder; mkdir Orthofinder
+	cp `ls $path/0.RelativeGenome/*.pep.fa | grep -v "Relative.pep.fa"` ./Orthofinder/
+	cp $path/6.EVidenceModeler/$prefix.pep.fa ./Orthofinder/
+	orthofinder -f Orthofinder/ -t $cores -a $cores -X
+	cp `find ./ -name Orthogroups.txt` ./
+	cp `find ./ -name Orthogroups.GeneCount.tsv` ./
+	cat $path/7.CleanUp/Orthofinder/*.pep.fa > AllPep.fa
+	perl $path/0.Codes/GetSeqByFamily.pl AllPep.fa Orthogroups.txt > AssignedGF.pep.fa
+	rm -rf tmp1 Split
+	mkdir tmp1 Split
+	diamond blastp --db $path/0.Database/ReviewedUniProt --query AssignedGF.pep.fa --out ScanReviewedUniProt.dmnd --evalue 0.0000000001 --threads $cores --tmpdir ./tmp1
+
+	# Split protein sequences to fast domain annotation
+	seqkit split2 -p 1280 -O Split AssignedGF.pep.fa
+	cd Split; rm Pfam.log Pfam.sh ScanPfam*txt ScanPfam*tbl
+	for name in `ls AssignedGF.pep.part_*.fa | sed 's/.fa$//g' | sed 's/.*\.//g'`; do echo "hmmscan -o ScanPfam.$name.txt --tblout ScanPfam.$name.tbl --cpu 1 --noali -E 1e-5 $path/0.Database/Pfam-A.hmm AssignedGF.pep.$name.fa" >> Pfam.sh; done
+	chmod u+x Pfam.sh
+	parallel --jobs $cores < Pfam.sh 2>>Pfam.log
+	cat ScanPfam*tbl > $path/7.CleanUp/ScanPfam.AllPep.tbl
+	conda deactivate
+	
+	# Clean gene set after removals if transposon gene
+	cd $path/7.CleanUp
+	perl $path/0.Codes/DigestDiamondSearch.pl ScanReviewedUniProt.dmnd $path/0.Database/uniprot_sprot.fasta > FamAnno.UniProt.AllPep
+	perl $path/0.Codes/DigestDomainByFamily.pl ScanPfam.AllPep.tbl > FamAnno.HmmDomain.AllPep
+	perl $path/0.Codes/TransposonFamily.pl AssignedGF.pep.fa FamAnno.HmmDomain.AllPep 0.2 5 > Transposon.HmmDomain
+	perl $path/0.Codes/TransposonFamily.pl AssignedGF.pep.fa FamAnno.UniProt.AllPep 0.2 5 > Transposon.UniProt
+	cat Transposon.HmmDomain Transposon.UniProt | sort | uniq | grep -f - AssignedGF.pep.fa | sed 's/.*://g' | grep -vf - $path/6.EVidenceModeler/$prefix.gene.gff > $prefix.final.gff
+	gffread -g $genome -x $prefix.finalcds.fa -y $prefix.finalpep.fa -S $prefix.final.gff
+	# Functional annotation for gene filtering
+	# source activate function
+	# mkdir tmp2
+	# emapper.py --cpu $cores --mp_start_method forkserver --data_dir /gpfs/users/haomin/8.Development/miniconda3/envs/function/lib/python3.12/site-packages/data -o out --output Filter.$prefix --temp_dir ./tmp2 --override -m diamond --dmnd_ignore_warnings -i $path/7.CleanUp/Orthofinder/$prefix.pep.fa --evalue 0.001 --score 60 --pident 40 --query_cover 20 --subject_cover 20 --itype proteins --tax_scope auto --target_orthologs all --go_evidence non-electronic --pfam_realign none --report_orthologs --decorate_gff yes --excel 2>>emapper.log
+	# conda deactivate
+	# source activate annotation
+	# awk '{print $1}' Filter.$prefix.emapper.annotations | grep -v "#" | grep -vf - Orthofinder/$prefix.pep.fa | grep ">" | sed 's/>//g' | grep -f - $path/6.EVidenceModeler/$prefix.gene.gff | awk '{if($3=="exon")print $9}' | sed 's/.*=//' | perl $path/0.Codes/Count.pl - | awk '{if($2==1)print $1}' | grep -f - Orthogroups.txt | sed 's/:.*//g' > SingleExonNoAnno.GeneFamily
+	# cat Transposon.GeneFamily SingleExonNoAnno.GeneFamily | sort | uniq | grep -f - AssignedGF.pep.fa | sed 's/.*://g' | grep -vf - $path/6.EVidenceModeler/$prefix.gene.gff > $prefix.final.gff
+	# gffread -g $genome -x $prefix.finalcds.fa -y $prefix.finalpep.fa -S $prefix.final.gff
+	# conda deactivate
+	echo "`date`     Step 7: Clean up the genes and reformat the name [end]" >> $path/GenomeAnno.log
+else
+	echo "`date`     Step 7: Clean up the genes and reformat the name [skip]" >> $path/GenomeAnno.log
+fi
+
+
+if [ "$step" -lt 3 ] 2>/dev/null; then
+	echo "`date`     Step 8: BUSCO assessment of genome assembly and gene annotation [start]" >> $path/GenomeAnno.log
+	cd $path/8.BUSCO
+	source activate busco
+	rm -rf *
+	busco -i $path/7.CleanUp/$prefix.finalpep.fa -c 12 -o T2TAnno -m prot -l $path/0.Database/busco_downloads/embryophyta_odb10/ --offline 2>> error.log
+        # busco -i $genome -c 32 -o T2TGenome -m geno -l $path/0.Database/busco_downloads/embryophyta_odb10/ --offline 2>> error.log
+	conda deactivate
+	echo "`date`     Step 8: BUSCO assessment of genome assembly and gene annotation [end]" >> $path/GenomeAnno.log
+else
+	echo "`date`     Step 8: BUSCO assessment of genome assembly and gene annotation [skip]" >> $path/GenomeAnno.log
+fi
+
+
+if [ "$step" -lt 4 ] 2>/dev/null; then
+	echo "`date`     Step 9: ncRNA Annotation using barrnap, tRNAscan-SE and Infernal [start]" >> $path/GenomeAnno.log
+	cd $path/9.ncRNA
+	rm -rf *
+	source activate annotation
+	sed 's/^[ACGT][ACGT][ACGT][ACGT]/GATC/' $genome > $prefix.tmp.fasta
+	barrnap --kingdom euk --threads $cores --outseq $prefix.rRNA.fa $prefix.tmp.fasta > $prefix.rRNA.gff3 2>>barrnap.log
+
+	tRNAscan-SE $genome -o $prefix.tRNA.out -f $prefix.tRNA.ss -m $prefix.tRNA.stats --thread $cores 2>>tRNAscan.log
+	perl $path/0.Codes/convert_tRNAScanSE_to_gff3.pl -i $prefix.tRNA.out > $prefix.tRNA.gff3
+
+	genome_total=`perl $path/0.Codes/GenomeSize.pl $genome`
+	CMnumber=`grep "ACC" $path/0.Database/Rfam.cm | wc -l`
+	Z=`echo $genome_total*2*$CMnumber/1000000 | bc`
+	cmscan -Z $Z --cut_ga --rfam --nohmmonly --tblout $prefix.tblout --fmt 2 --cpu $cores --clanin $path/0.Database/Rfam.clanin $path/0.Database/Rfam.cm $genome > $prefix.cmscan 2>>infernal.log
+	perl $path/0.Codes/infernal-tblout2gff.pl --cmscan --fmt2 $prefix.tblout > $prefix.ncRNA.gff3
+	awk 'BEGIN{OFS="\t";}{if(FNR==1) print "target_name\taccession\tquery_name\tquery_start\tquery_end\tstrand\tscore\tEvalue"; if(FNR>2 && $20!="=" && $0!~/^#/) print $2,$3,$4,$10,$11,$12,$17,$18; }' $prefix.tblout > $prefix.ncRNA.xls
+	conda deactivate
+	echo "`date`     Step 9: ncRNA Annotation using tRNAscan-SE and Infernal [end]" >> $path/GenomeAnno.log
+else
+	echo "`date`     Step 9: ncRNA Annotation using tRNAscan-SE and Infernal [skip]" >> $path/GenomeAnno.log
+fi
+
+
+echo "`date`     Step 10: Funtional annotation for the protein-coding genes [start]" >> $path/GenomeAnno.log
+cd $path/10.Function
+rm -rf *
+source activate function
+mkdir tmp
+emapper.py --cpu $cores --mp_start_method forkserver --data_dir /gpfs/users/haomin/8.Development/miniconda3/envs/function/lib/python3.12/site-packages/data -o out --output $prefix --temp_dir ./tmp --override -m diamond --dmnd_ignore_warnings -i $path/7.CleanUp/$prefix.finalpep.fa --evalue 0.001 --score 60 --pident 40 --query_cover 20 --subject_cover 20 --itype proteins --tax_scope auto --target_orthologs all --go_evidence non-electronic --pfam_realign none --report_orthologs --decorate_gff yes --excel 2>>emapper.log
+#interproscan.sh -appl PfamA -appl PANTHER -i $path/7.CleanUp/$prefix.finalpep.fa -f tsv -goterms -iprlooup -pa -dp -cpu 64 -b Iprscan.$name
+#cat *.tsv |awk 'BEGIN{FS="\t"}{if($4 == "Pfam")print $1"\t"$5": "$6}' |sort -k 1.3n |uniq|awk -F"\t" '{a[$1]=a[$1]$2"; "}END{for( i in a){print i"\t"a[i]}}'|sed "s/; $//g" |sort -k 1.3n |sed '1i\gene\tinterproscan.pfam' > Kona.pfam &
+#cat *.tsv |awk 'BEGIN{FS="\t"}{if($4 == "PANTHER")print $1"\t"$5": "$6}' |sort -k 1.3n |uniq|awk -F"\t" '{a[$1]=a[$1]$2"; "}END{for( i in a){print i"\t"a[i]}}'|sed "s/; $//g" |sort -k 1.3n |sed '1i\gene\tinterproscan.pfam' > Timor2.panther &
+#cat *.tsv |cut -f1,12,13|grep "IPR"|awk 'BEGIN{FS="\t"}{print $1"\t"$2": "$3}'|sort -k 1.3n|uniq |awk -F"\t" '{a[$1]=a[$1]$2"; "}END{for( i in a){print i"\t"a[i]}}'|sed "s/; $//g" |sort -k 1.3n |sed '1i\gene\tinterpro' > Kona.interpro &
+conda deactivate
+echo "`date`     Step 10: Funtional annotation for the protein-coding genes [end]" >> $path/GenomeAnno.log
+
+
+## Generate final annotation dataset
+cd $path
+if [ -d $path/99.FinalData ]; then
+	rm -rf $path/99.FinalData
+fi
+mkdir 99.FinalData
+sed '/Repeat Stats/,$d' $path/1.EDTA/*sum > $path/99.FinalData/Transposon.tbl
+cp $path/1.EDTA/*.mod.EDTA.intact.gff3 $path/1.EDTA/*.mod.EDTA.TEanno.gff3 $path/99.FinalData/
+grep "overall alignment" $path/work*.e | sed 's/.*://' > $path/99.FinalData/MappingRate.NGS.RNAseq
+cp $path/7.CleanUp/$prefix.finalcds.fa $path/7.CleanUp/$prefix.finalpep.fa $path/7.CleanUp/$prefix.final.gff $path/99.FinalData/
+cp $path/8.BUSCO/T2TAnno/short_summary.specific.*.txt $path/99.FinalData/
+# cp $path/8.BUSCO/T2TGenome/short_summary.specific.*.txt $path/99.FinalData/
+cp $path/9.ncRNA/$prefix.ncRNA.gff3 $path/9.ncRNA/$prefix.rRNA.gff3 $path/9.ncRNA/$prefix.tRNA.gff3 $path/99.FinalData/
+cp $path/10.Function/$prefix.emapper.annotations* $path/99.FinalData/
+echo "Finish Genome Annotation: Final annotation files in $path/99.FinalData" >> $path/GenomeAnno.log
+echo "        1.Transposon: Transposon.tbl, *.mod.EDTA.intact.gff3, *.mod.EDTA.TEanno.gff3" >> $path/GenomeAnno.log
+echo "        2.Protein-coding genes: $prefix.finalcds.fa, $prefix.finalpep.fa, $prefix.final.gff" >> $path/GenomeAnno.log
+echo "        3.BUSCO: short_summary.specific.embryophyta_odb10.*.txt" >> $path/GenomeAnno.log
+echo "        4.non-coding RNAs: $prefix.ncRNA.gff3, $prefix.rRNA.gff3, $prefix.tRNA.gff3" >> $path/GenomeAnno.log
+echo "        5.Function: $prefix.emapper.annotations*" >> $path/GenomeAnno.log
+echo ""
+echo "     >>>>>>>>>   Thank you for your using the HiGenAnno pipeline!   <<<<<<<<<" >> $path/GenomeAnno.log
+echo "     >>>>>>>>>          Please cite the HiGenAnno article.          <<<<<<<<<" >> $path/GenomeAnno.log
+echo "     >>>>>>>>> Higenetec Co. Ltd. holds the copyright of HiGenAnno. <<<<<<<<<" >> $path/GenomeAnno.log
+echo "     >>>>>>>>>       May the Father of Understanding Guide Us.       <<<<<<<<<" >> $path/GenomeAnno.log
+
